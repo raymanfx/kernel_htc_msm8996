@@ -36,6 +36,7 @@
 #include <linux/posix_acl.h>
 #include <linux/hash.h>
 #include <asm/uaccess.h>
+#include <trace/events/mmcio.h>
 
 #include "internal.h"
 #include "mount.h"
@@ -3701,6 +3702,7 @@ SYSCALL_DEFINE1(rmdir, const char __user *, pathname)
 	return do_rmdir(AT_FDCWD, pathname);
 }
 
+extern atomic_t em_remount;
 /**
  * vfs_unlink - unlink a filesystem object
  * @dir:	parent directory
@@ -3723,6 +3725,7 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry, struct inode **delegate
 {
 	struct inode *target = dentry->d_inode;
 	int error = may_delete(dir, dentry, 0);
+	struct super_block *sb = dentry->d_sb;
 
 	if (error)
 		return error;
@@ -3730,6 +3733,12 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry, struct inode **delegate
 	if (!dir->i_op->unlink)
 		return -EPERM;
 
+	trace_vfs_unlink(dentry, dentry->d_inode->i_size);
+	if (atomic_read(&em_remount) && sb && (sb->s_flags & MS_EMERGENCY_RO)) {
+		printk_ratelimited(KERN_WARNING "VFS reject: %s pid:%d(%s)(parent:%d/%s) file %s\n", __func__,
+				current->pid, current->comm, current->parent->pid, current->parent->comm, dentry->d_name.name);
+		return -EROFS;
+	}
 	mutex_lock(&target->i_mutex);
 	if (is_local_mountpoint(dentry))
 		error = -EBUSY;
@@ -3748,6 +3757,7 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry, struct inode **delegate
 	}
 out:
 	mutex_unlock(&target->i_mutex);
+	trace_vfs_unlink_done(dentry);
 
 	/* We don't d_delete() NFS sillyrenamed files--they still exist. */
 	if (!error && !(dentry->d_flags & DCACHE_NFSFS_RENAMED)) {
@@ -4121,6 +4131,7 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	struct inode *target = new_dentry->d_inode;
 	bool new_is_dir = false;
 	unsigned max_links = new_dir->i_sb->s_max_links;
+	struct super_block *sb = old_dentry->d_sb;
 
 	if (source == target)
 		return 0;
@@ -4147,6 +4158,13 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 
 	if (flags && !old_dir->i_op->rename2)
 		return -EINVAL;
+
+	if (atomic_read(&em_remount) && sb && (sb->s_flags & MS_EMERGENCY_RO)) {
+		printk_ratelimited(KERN_WARNING "VFS reject: %s pid:%d(%s)(parent:%d/%s) old_file %s new_file %s\n",
+				__func__, current->pid, current->comm, current->parent->pid, current->parent->comm,
+				old_dentry->d_name.name, new_dentry->d_name.name);
+		return -EROFS;
+	}
 
 	/*
 	 * If we are going to change the parent - check write permissions,
